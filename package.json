@@ -13,7 +13,8 @@
     "dev": "pnpm -r dev",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "release": "pnpm build && pnpm test && pnpm -r --filter './packages/*' publish --no-git-checks"
   },
   "engines": {
     "node": ">=20.0.0",

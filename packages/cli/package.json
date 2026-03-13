@@ -6,7 +6,9 @@
   "bin": {
     "inkos": "dist/index.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,6 +16,8 @@
     "directory": "packages/cli"
   },
   "scripts": {
+    "prepack": "node ../../scripts/prepare-package-for-publish.mjs",
+    "postpack": "node ../../scripts/restore-package-json.mjs",
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run --passWithNoTests",

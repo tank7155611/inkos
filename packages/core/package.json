@@ -22,6 +22,8 @@
     "directory": "packages/core"
   },
   "scripts": {
+    "prepack": "node ../../scripts/prepare-package-for-publish.mjs",
+    "postpack": "node ../../scripts/restore-package-json.mjs",
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
