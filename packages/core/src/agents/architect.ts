@@ -19,7 +19,11 @@ export class ArchitectAgent extends BaseAgent {
     return "architect";
   }
 
-  async generateFoundation(book: BookConfig, externalContext?: string): Promise<ArchitectOutput> {
+  async generateFoundation(
+    book: BookConfig,
+    externalContext?: string,
+    reviewFeedback?: string,
+  ): Promise<ArchitectOutput> {
     const { profile: gp, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
     const resolvedLanguage = book.language ?? gp.language;
@@ -27,6 +31,7 @@ export class ArchitectAgent extends BaseAgent {
     const contextBlock = externalContext
       ? `\n\n## 外部指令\n以下是来自外部系统的创作指令，请将其融入设定中：\n\n${externalContext}\n`
       : "";
+    const reviewFeedbackBlock = this.buildReviewFeedbackBlock(reviewFeedback, resolvedLanguage);
 
     const numericalBlock = gp.numericalSystem
       ? `- 有明确的数值/资源体系可追踪
@@ -195,18 +200,20 @@ enableFullCastTracking: false
 
     const pendingHooksPrompt = resolvedLanguage === "en"
       ? `Initial hook pool (Markdown table):
-| hook_id | start_chapter | type | status | last_advanced_chapter | expected_payoff | notes |
+| hook_id | start_chapter | type | status | last_advanced_chapter | expected_payoff | payoff_timing | notes |
 
 Rules for the hook table:
 - Column 5 must be a pure chapter number, never natural-language description
 - During book creation, all planned hooks are still unapplied, so last_advanced_chapter = 0
+- Column 7 must be one of: immediate / near-term / mid-arc / slow-burn / endgame
 - If you want to describe the initial clue/signal, put it in notes instead of column 5`
       : `初始伏笔池（Markdown表格）：
-| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 备注 |
+| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |
 
 伏笔表规则：
 - 第5列必须是纯数字章节号，不能写自然语言描述
 - 建书阶段所有伏笔都还没正式推进，所以第5列统一填 0
+- 第7列必须填写：立即 / 近期 / 中程 / 慢烧 / 终局 之一
 - 如果要说明“初始线索/最初信号”，写进备注，不要写进第5列`;
 
     const finalRequirementsPrompt = resolvedLanguage === "en"
@@ -229,7 +236,7 @@ ${eraBlock}
 4. 伏笔前后呼应，不留悬空线
 5. 配角有独立动机，不是工具人`;
 
-    const systemPrompt = `你是一个专业的网络小说架构师。你的任务是为一本新的${gp.name}小说生成完整的基础设定。${contextBlock}
+    const systemPrompt = `你是一个专业的网络小说架构师。你的任务是为一本新的${gp.name}小说生成完整的基础设定。${contextBlock}${reviewFeedbackBlock}
 
 要求：
 - 平台：${book.platform}
@@ -489,9 +496,9 @@ enableFullCastTracking: false
 
     const pendingHooksPrompt = resolvedLanguage === "en"
       ? `Identify all active hooks from the source text (Markdown table):
-| hook_id | start_chapter | type | status | latest_progress | expected_payoff | notes |`
+| hook_id | start_chapter | type | status | latest_progress | expected_payoff | payoff_timing | notes |`
       : `从正文中识别的所有伏笔（Markdown表格）：
-| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 备注 |`;
+| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |`;
 
     const keyPrinciplesPrompt = resolvedLanguage === "en"
       ? `## Key Principles
@@ -579,9 +586,11 @@ ${keyPrinciplesPrompt}`;
     book: BookConfig,
     fanficCanon: string,
     fanficMode: FanficMode,
+    reviewFeedback?: string,
   ): Promise<ArchitectOutput> {
     const { profile: gp, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
+    const reviewFeedbackBlock = this.buildReviewFeedbackBlock(reviewFeedback, book.language ?? "zh");
 
     const MODE_INSTRUCTIONS: Record<FanficMode, string> = {
       canon: "剧情发生在原作空白期或未详述的角度。不可改变原作已确立的事实。",
@@ -595,6 +604,15 @@ ${keyPrinciplesPrompt}`;
 ## 同人模式：${fanficMode}
 ${MODE_INSTRUCTIONS[fanficMode]}
 
+## 新时空要求（关键）
+你必须为这本同人设计一个**原创的叙事空间**，而不是复述原作剧情。具体要求：
+1. **明确分岔点**：story_bible 必须标注"本作从原作的哪个节点分岔"，或"本作发生在原作未涉及的什么时空"
+2. **独立核心冲突**：volume_outline 的核心冲突必须是原创的，不是原作情节的翻版。原作角色可以出现，但他们面对的是新问题
+3. **5章内引爆**：volume_outline 的第1卷必须在前5章内建立核心悬念，不允许用3章做铺垫才到引爆点
+4. **场景新鲜度**：至少50%的关键场景发生在原作未出现的地点或情境中
+
+${reviewFeedbackBlock}
+
 ## 原作正典
 ${fanficCanon}
 
@@ -604,8 +622,8 @@ ${genreBody}
 ## 关键原则
 1. **不发明主要角色** — 主要角色必须来自原作正典的角色档案
 2. 可以添加原创配角，但必须在 story_bible 中标注为"原创角色"
-3. story_bible 保留原作世界观，标注同人的改动/扩展部分
-4. volume_outline 以原作事件为锚点，标注哪些是原作事件、哪些是同人原创
+3. story_bible 保留原作世界观，标注同人的改动/扩展部分，并明确写出**分岔点**和**新时空设定**
+4. volume_outline 不得复述原作剧情节拍。每卷的核心事件必须是原创的，标注"原创"
 5. book_rules 的 fanficMode 必须设为 "${fanficMode}"
 6. 主角设定来自原作角色档案中的第一个角色（或用户在标题中暗示的角色）
 
@@ -653,13 +671,42 @@ prohibitions:
     return this.parseSections(response.content);
   }
 
+  private buildReviewFeedbackBlock(
+    reviewFeedback: string | undefined,
+    language: "zh" | "en",
+  ): string {
+    const trimmed = reviewFeedback?.trim();
+    if (!trimmed) return "";
+
+    if (language === "en") {
+      return `\n\n## Previous Review Feedback
+The previous foundation draft was rejected. You must explicitly fix the following issues in this regeneration instead of paraphrasing the same design:
+
+${trimmed}\n`;
+    }
+
+    return `\n\n## 上一轮审核反馈
+上一轮基础设定未通过审核。你必须在这次重生中明确修复以下问题，不能只换措辞重写同一套方案：
+
+${trimmed}\n`;
+  }
+
   private parseSections(content: string): ArchitectOutput {
+    const parsedSections = new Map<string, string>();
+    const sectionPattern = /^\s*===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===\s*$/gim;
+    const matches = [...content.matchAll(sectionPattern)];
+
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i]!;
+      const rawName = match[1] ?? "";
+      const start = (match.index ?? 0) + match[0].length;
+      const end = matches[i + 1]?.index ?? content.length;
+      const normalizedName = this.normalizeSectionName(rawName);
+      parsedSections.set(normalizedName, content.slice(start, end).trim());
+    }
+
     const extract = (name: string): string => {
-      const regex = new RegExp(
-        `=== SECTION: ${name} ===\\s*([\\s\\S]*?)(?==== SECTION:|$)`,
-      );
-      const match = content.match(regex);
-      const section = match?.[1]?.trim();
+      const section = parsedSections.get(this.normalizeSectionName(name));
       if (!section) {
         throw new Error(`Architect output missing required section: ${name}`);
       }
@@ -676,6 +723,15 @@ prohibitions:
       currentState: extract("current_state"),
       pendingHooks: extract("pending_hooks"),
     };
+  }
+
+  private normalizeSectionName(name: string): string {
+    return name
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[`"'*_]/g, " ")
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
   }
 
   private stripTrailingAssistantCoda(section: string): string {
@@ -727,7 +783,8 @@ prohibitions:
         status: row[3] ?? "open",
         lastAdvancedChapter: normalizedProgress,
         expectedPayoff: row[5] ?? "",
-        notes,
+        payoffTiming: row.length >= 8 ? row[6] ?? "" : "",
+        notes: row.length >= 8 ? this.mergeHookNotes(row[7] ?? "", seedNote, language) : notes,
       };
     });
 

@@ -205,6 +205,11 @@ describe("WriterAgent", () => {
               reason: "Carry forward unresolved hook.",
               excerpt: "relationship | open | 101 | Mentor oath debt with Lin Yue",
             },
+            {
+              source: "runtime/hook_debt#mentor-oath",
+              reason: "Explicit hook debt brief for the agenda target.",
+              excerpt: "mentor-oath | cadence: slow-burn | seed: ch8 River Camp - Mentor debt becomes personal | latest: ch99 Locked Gate - Lin Yue chooses the mentor line over the guild line | unpaid: reveal why the mentor broke the oath",
+            },
           ],
         },
         ruleStack: {
@@ -224,7 +229,9 @@ describe("WriterAgent", () => {
       expect(settlePrompt).toContain("## 本章控制输入");
       expect(settlePrompt).toContain("story/chapter_summaries.md#99");
       expect(settlePrompt).toContain("| 99 | Locked Gate |");
-      expect(settlePrompt).toContain("| stale-ledger | 14 | mystery | open | 70 | 120 | Old ledger debt is dormant but unresolved |");
+      expect(settlePrompt).toContain("## Hook Debt Briefs");
+      expect(settlePrompt).toContain("mentor-oath | cadence: slow-burn");
+      expect(settlePrompt).toContain("| stale-ledger | 14 | mystery | open | 70 | 120 | 中程 | Old ledger debt is dormant but unresolved |");
       expect(settlePrompt).not.toContain("| 1 | Guild Trail |");
       expect(settlePrompt).not.toContain("old-seal");
       expect(settlePrompt).not.toContain("Guildmaster Ren");
@@ -238,9 +245,15 @@ describe("WriterAgent", () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-runtime-state-test-"));
     const bookDir = join(root, "book");
     const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
     await mkdir(storyDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
 
     await Promise.all([
+      writeFile(join(chaptersDir, "index.json"), JSON.stringify([
+        { number: 1, title: "Ch1", status: "approved" },
+        { number: 2, title: "Ch2", status: "approved" },
+      ]), "utf-8"),
       writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- The jade seal cannot be destroyed.\n", "utf-8"),
       writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 3\nTrace the debt through the river-port ledger.\n", "utf-8"),
       writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8"),
@@ -377,13 +390,169 @@ describe("WriterAgent", () => {
     }
   });
 
+  it("overrides hallucinated chapter numbers across both delta and summary row", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-runtime-state-hallucinated-chapter-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+    await mkdir(storyDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "index.json"), JSON.stringify([
+        { number: 1, title: "Ch1", status: "approved" },
+        { number: 2, title: "Ch2", status: "approved" },
+      ]), "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- The city still remembers 1988.\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 3\nTrace the debt through the river-port ledger.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), [
+        "# Current State",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        "| Current Chapter | 2 |",
+        "| Current Goal | Find the vanished mentor |",
+        "| Current Conflict | Guild pressure keeps colliding with the debt trail |",
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), [
+        "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| mentor-debt | 1 | relationship | open | 2 | 6 | Still unresolved |",
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), [
+        "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 2 | Old Ledger | Lin Yue | Lin Yue finds the old ledger | Debt sharpens | mentor-debt advanced | tense | mainline |",
+        "",
+      ].join("\n"), "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "River Ledger",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "Lin Yue follows the debt into the river-port ledger. The old wall still carries the year 1988.",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- mentor-debt advanced",
+          "",
+          "=== RUNTIME_STATE_DELTA ===",
+          "```json",
+          JSON.stringify({
+            chapter: 1988,
+            currentStatePatch: {
+              currentGoal: "Trace the debt through the river-port ledger.",
+              currentConflict: "Guild pressure keeps colliding with the debt trail.",
+            },
+            hookOps: {
+              upsert: [
+                {
+                  hookId: "mentor-debt",
+                  startChapter: 1,
+                  type: "relationship",
+                  status: "progressing",
+                  lastAdvancedChapter: 1988,
+                  expectedPayoff: "Reveal the debt.",
+                  notes: "The ledger clue sharpens the line.",
+                },
+              ],
+              resolve: [],
+              defer: [],
+            },
+            chapterSummary: {
+              chapter: 1988,
+              title: "River Ledger",
+              characters: "Lin Yue",
+              events: "Lin Yue follows the debt into the river-port ledger.",
+              stateChanges: "The debt line sharpens.",
+              hookActivity: "mentor-debt advanced",
+              mood: "tense",
+              chapterType: "investigation",
+            },
+            notes: [],
+          }, null, 2),
+          "```",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-03-25T00:00:00.000Z",
+          updatedAt: "2026-03-25T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 3,
+        lengthSpec: buildLengthSpec(2200, "en"),
+      });
+
+      expect(output.runtimeStateDelta?.chapter).toBe(3);
+      expect(output.runtimeStateDelta?.chapterSummary?.chapter).toBe(3);
+      expect(output.runtimeStateSnapshot?.manifest.lastAppliedChapter).toBe(3);
+      expect(output.runtimeStateSnapshot?.hooks.hooks[0]?.lastAdvancedChapter).toBe(3);
+      expect(output.updatedHooks).toContain("| mentor-debt | 1 | relationship | progressing | 3 |");
+      expect(output.updatedChapterSummaries).toContain("| 3 | River Ledger |");
+      expect(output.chapterSummary).toContain("| 3 | River Ledger |");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("returns the arbiter-resolved delta instead of raw new-hook candidates", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-arbiter-test-"));
     const bookDir = join(root, "book");
     const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
     await mkdir(storyDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
 
     await Promise.all([
+      writeFile(join(chaptersDir, "index.json"), JSON.stringify([
+        { number: 1, title: "Ch1", status: "approved" },
+        { number: 2, title: "Ch2", status: "approved" },
+      ]), "utf-8"),
       writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- Anonymous messages keep steering the debt trail.\n", "utf-8"),
       writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 3\nThe anonymous source widens from route to address.\n", "utf-8"),
       writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8"),
@@ -760,6 +929,297 @@ describe("WriterAgent", () => {
       expect(creativePrompt).toContain("## English Variance Brief");
       expect(creativePrompt).toContain("High-frequency phrases");
       expect(creativePrompt).toContain("Scene obligation");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("renders explicit title history, mood trail, and canon blocks in governed creative prompts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-governed-evidence-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- Registry seals still matter.\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 4\nPush Mara back toward the archive ledger.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose lean.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Mara still hides the ledger fragment.\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- ledger-fragment\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "Archive Pressure",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "Mara corners Taryn beside the archive ledger.",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- ledger-fragment advanced",
+          "",
+          "=== UPDATED_STATE ===",
+          "state",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "hooks",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 4 | Archive Pressure | Mara,Taryn | Pressure rises | Trail narrows | ledger-fragment advanced | tense | confrontation |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "subplots",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "arcs",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "matrix",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-03-26T00:00:00.000Z",
+          updatedAt: "2026-03-26T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 4,
+        chapterIntent: "# Chapter Intent\n\n## Goal\nPush Mara back toward the archive ledger.\n",
+        contextPackage: {
+          chapter: 4,
+          selectedContext: [
+            {
+              source: "story/chapter_summaries.md#recent_titles",
+              reason: "Avoid repeated ledger titles.",
+              excerpt: "1: Ledger in Rain | 2: Ledger at Dusk | 3: Harbor Ledger",
+            },
+            {
+              source: "story/chapter_summaries.md#recent_mood_type_trail",
+              reason: "Track recent emotional and chapter-type cadence.",
+              excerpt: "1: tight / investigation | 2: tight / investigation | 3: tight / investigation",
+            },
+            {
+              source: "story/parent_canon.md",
+              reason: "Preserve parent canon constraints.",
+              excerpt: "The mentor does not learn about the archive fire until volume two.",
+            },
+            {
+              source: "story/fanfic_canon.md",
+              reason: "Preserve extracted fanfic canon constraints.",
+              excerpt: "Mara may diverge from the archive route, but the oath debt logic must stay intact.",
+            },
+          ],
+        },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: {
+            hard: ["current_state"],
+            soft: ["current_focus"],
+            diagnostic: ["continuity_audit"],
+          },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+        lengthSpec: buildLengthSpec(2200, "en"),
+      });
+
+      const creativePrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
+      expect(creativePrompt).toContain("## Recent Title History");
+      expect(creativePrompt).toContain("Ledger in Rain");
+      expect(creativePrompt).toContain("## Recent Mood / Chapter Type Trail");
+      expect(creativePrompt).toContain("tight / investigation");
+      expect(creativePrompt).toContain("## Canon Evidence");
+      expect(creativePrompt).toContain("archive fire until volume two");
+      expect(creativePrompt).toContain("oath debt logic must stay intact");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("renders an explicit hook agenda block and removes placeholder hook ids from the governed write contract", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-hook-agenda-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- Registry seals still matter.\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 4\nPush Mara back toward the archive ledger.\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose lean.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Mara still hides the ledger fragment.\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- ledger-fragment\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "Archive Pressure",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "Mara corners Taryn beside the archive ledger.",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "- ledger-fragment advanced",
+          "",
+          "=== UPDATED_STATE ===",
+          "state",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "hooks",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 4 | Archive Pressure | Mara,Taryn | Pressure rises | Trail narrows | ledger-fragment advanced | tense | confrontation |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "subplots",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "arcs",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "matrix",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 20,
+          chapterWordCount: 2200,
+          language: "en",
+          createdAt: "2026-03-26T00:00:00.000Z",
+          updatedAt: "2026-03-26T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 4,
+        chapterIntent: [
+          "# Chapter Intent",
+          "",
+          "## Goal",
+          "Push Mara back toward the archive ledger.",
+          "",
+          "## Hook Agenda",
+          "### Must Advance",
+          "- mentor-oath",
+          "",
+          "### Eligible Resolve",
+          "- ledger-fragment",
+          "",
+          "### Stale Debt",
+          "- stale-ledger",
+          "",
+          "### Avoid New Hook Families",
+          "- relationship",
+        ].join("\n"),
+        contextPackage: {
+          chapter: 4,
+          selectedContext: [
+            {
+              source: "story/pending_hooks.md#mentor-oath",
+              reason: "Carry the unresolved oath line.",
+              excerpt: "relationship | open | old oath debt",
+            },
+          ],
+        },
+        ruleStack: {
+          layers: [{ id: "L4", name: "current_task", precedence: 70, scope: "local" }],
+          sections: {
+            hard: ["current_state"],
+            soft: ["current_focus"],
+            diagnostic: ["continuity_audit"],
+          },
+          overrideEdges: [],
+          activeOverrides: [],
+        },
+        lengthSpec: buildLengthSpec(2200, "en"),
+      });
+
+      const systemPrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[0]?.content ?? "";
+      const creativePrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
+
+      expect(systemPrompt).not.toContain("Hook-A / Hook-B");
+      expect(systemPrompt).toContain("真实 hook_id");
+      expect(creativePrompt).toContain("## Explicit Hook Agenda");
+      expect(creativePrompt).toContain("mentor-oath");
+      expect(creativePrompt).toContain("ledger-fragment");
+      expect(creativePrompt).toContain("stale-ledger");
+      expect(creativePrompt).toContain("relationship");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

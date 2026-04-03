@@ -10,7 +10,24 @@ import {
   type HookStatus,
   type StateManifest,
 } from "../models/runtime-state.js";
-import type { Fact, StoredHook, StoredSummary } from "./memory-db.js";
+import type { Fact, StoredHook } from "./memory-db.js";
+import { normalizeHookPayoffTiming } from "../utils/hook-lifecycle.js";
+import {
+  inferFactSubject,
+  isCurrentChapterLabel,
+  isStateTableHeaderRow,
+  normalizeHookId,
+  parseChapterSummariesMarkdown,
+  parseInteger,
+  parseMarkdownTableRows,
+} from "../utils/story-markdown.js";
+
+export {
+  normalizeHookId,
+  parseChapterSummariesMarkdown,
+  parseCurrentStateFacts,
+  parsePendingHooksMarkdown,
+} from "../utils/story-markdown.js";
 
 export interface BootstrapStructuredStateResult {
   readonly createdFiles: ReadonlyArray<string>;
@@ -71,12 +88,10 @@ export async function bootstrapStructuredStateFromMarkdown(params: {
     warnings,
     bootstrapState: markdownState.currentState,
   });
-  const derivedProgress = Math.max(
-    markdownState.durableStoryProgress,
-    currentState.chapter,
-    maxSummaryChapter(summariesState),
-    maxHookChapter(hooksState.hooks),
-  );
+  // Only trust durable artifact progress (chapter files + index).
+  // currentState.chapter comes from markdown which can contain
+  // hallucinated numbers (e.g. year 1988 parsed as chapter 1988).
+  const derivedProgress = markdownState.durableStoryProgress;
   if ((existingManifest?.lastAppliedChapter ?? 0) > derivedProgress) {
     appendWarning(
       warnings,
@@ -136,12 +151,7 @@ export async function rewriteStructuredStateFromMarkdown(params: {
   const manifest = StateManifestSchema.parse({
     schemaVersion: 2,
     language,
-    lastAppliedChapter: Math.max(
-      markdownState.durableStoryProgress,
-      currentState.chapter,
-      maxSummaryChapter(summariesState),
-      maxHookChapter(hooksState.hooks),
-    ),
+    lastAppliedChapter: markdownState.durableStoryProgress,
     projectionVersion: existingManifest?.projectionVersion ?? 1,
     migrationWarnings: uniqueStrings([
       ...(existingManifest?.migrationWarnings ?? []),
@@ -161,64 +171,6 @@ export async function rewriteStructuredStateFromMarkdown(params: {
     warnings: manifest.migrationWarnings,
     manifest,
   };
-}
-
-export function parseChapterSummariesMarkdown(markdown: string): StoredSummary[] {
-  const rows = parseMarkdownTableRows(markdown)
-    .filter((row) => /^\d+$/.test(row[0] ?? ""));
-
-  return rows.map((row) => ({
-    chapter: parseInt(row[0]!, 10),
-    title: row[1] ?? "",
-    characters: row[2] ?? "",
-    events: row[3] ?? "",
-    stateChanges: row[4] ?? "",
-    hookActivity: row[5] ?? "",
-    mood: row[6] ?? "",
-    chapterType: row[7] ?? "",
-  }));
-}
-
-export function parsePendingHooksMarkdown(markdown: string): StoredHook[] {
-  const tableRows = parseMarkdownTableRows(markdown)
-    .filter((row) => (row[0] ?? "").toLowerCase() !== "hook_id");
-
-  if (tableRows.length > 0) {
-    return tableRows
-      .filter((row) => normalizeHookId(row[0]).length > 0)
-      .map((row) => ({
-        hookId: normalizeHookId(row[0]),
-        startChapter: parseInteger(row[1]),
-        type: row[2] ?? "",
-        status: row[3] ?? "open",
-        lastAdvancedChapter: parseInteger(row[4]),
-        expectedPayoff: row[5] ?? "",
-        notes: row[6] ?? "",
-      }));
-  }
-
-  return markdown
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("-"))
-    .map((line) => line.replace(/^-\s*/, ""))
-    .filter(Boolean)
-    .map((line, index) => ({
-      hookId: `hook-${index + 1}`,
-      startChapter: 0,
-      type: "unspecified",
-      status: "open",
-      lastAdvancedChapter: 0,
-      expectedPayoff: "",
-      notes: line,
-    }));
-}
-
-export function parseCurrentStateFacts(
-  markdown: string,
-  fallbackChapter: number,
-): Fact[] {
-  return parseCurrentStateStateMarkdown(markdown, fallbackChapter, []).facts;
 }
 
 async function loadOrBootstrapCurrentState(params: {
@@ -333,14 +285,16 @@ function parsePendingHooksStateMarkdown(markdown: string, warnings: string[]) {
         .filter((row) => normalizeHookId(row[0]).length > 0)
         .map((row) => {
           const hookId = normalizeHookId(row[0]);
+          const legacyShape = row.length < 8;
           return {
             hookId,
-            startChapter: parseIntegerWithWarning(row[1], warnings, `${hookId}:startChapter`),
+            startChapter: parseStrictIntegerWithWarning(row[1], warnings, `${hookId}:startChapter`),
             type: row[2] ?? "unspecified",
             status: normalizeHookStatus(row[3], warnings, hookId),
-            lastAdvancedChapter: parseIntegerWithWarning(row[4], warnings, `${hookId}:lastAdvancedChapter`),
+            lastAdvancedChapter: parseStrictIntegerWithWarning(row[4], warnings, `${hookId}:lastAdvancedChapter`),
             expectedPayoff: row[5] ?? "",
-            notes: row[6] ?? "",
+            payoffTiming: legacyShape ? undefined : normalizeHookPayoffTiming(row[6]),
+            notes: legacyShape ? (row[6] ?? "") : (row[7] ?? ""),
           };
         }),
     });
@@ -360,6 +314,7 @@ function parsePendingHooksStateMarkdown(markdown: string, warnings: string[]) {
         status: "open" as HookStatus,
         lastAdvancedChapter: 0,
         expectedPayoff: "",
+        payoffTiming: undefined,
         notes: line,
       })),
   });
@@ -439,14 +394,9 @@ export async function resolveDurableStoryProgress(params: {
   readonly bookDir: string;
   readonly fallbackChapter?: number;
 }): Promise<number> {
-  const storyDir = join(params.bookDir, "story");
-  const state = await loadMarkdownBootstrapState({
-    bookDir: params.bookDir,
-    storyDir,
-    fallbackChapter: params.fallbackChapter ?? 0,
-    warnings: [],
-  });
-  return state.durableStoryProgress;
+  const explicitFallback = normalizeExplicitChapter(params.fallbackChapter);
+  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir);
+  return Math.max(durableArtifactProgress, explicitFallback);
 }
 
 async function loadJsonIfValid<T>(
@@ -478,16 +428,12 @@ async function loadMarkdownBootstrapState(params: {
     storyDir: params.storyDir,
     warnings: params.warnings,
   });
-  const durableArtifactProgress = await maxDurableArtifactChapter(params.bookDir);
-  const inferredFallbackChapter = Math.max(
-    params.fallbackChapter,
-    durableArtifactProgress,
-    maxSummaryChapter(summariesState),
-    maxHookChapter(hooksState.hooks),
-  );
+  const explicitFallback = normalizeExplicitChapter(params.fallbackChapter);
+  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir);
+  const authoritativeProgress = Math.max(explicitFallback, durableArtifactProgress);
   const currentState = await loadMarkdownCurrentState({
     storyDir: params.storyDir,
-    fallbackChapter: inferredFallbackChapter,
+    fallbackChapter: authoritativeProgress,
     warnings: params.warnings,
   });
 
@@ -495,10 +441,7 @@ async function loadMarkdownBootstrapState(params: {
     summariesState,
     hooksState,
     currentState,
-    durableStoryProgress: Math.max(
-      inferredFallbackChapter,
-      currentState.chapter,
-    ),
+    durableStoryProgress: authoritativeProgress,
   };
 }
 
@@ -527,28 +470,31 @@ async function loadMarkdownCurrentState(params: {
   return parseCurrentStateStateMarkdown(markdown, params.fallbackChapter, params.warnings);
 }
 
-async function maxDurableArtifactChapter(bookDir: string): Promise<number> {
+async function resolveContiguousArtifactChapterProgress(bookDir: string): Promise<number> {
+  const chapterNumbers = await loadDurableArtifactChapterNumbers(bookDir);
+  return resolveContiguousChapterPrefix(chapterNumbers);
+}
+
+async function loadDurableArtifactChapterNumbers(bookDir: string): Promise<number[]> {
   const chaptersDir = join(bookDir, "chapters");
   const indexPath = join(chaptersDir, "index.json");
-  const [indexChapter, fileChapter] = await Promise.all([
+  const [indexChapters, fileChapters] = await Promise.all([
     readFile(indexPath, "utf-8")
       .then((raw) => {
         const parsed = JSON.parse(raw) as Array<{ number?: unknown }>;
-        return parsed.reduce((max, entry) => (
-          typeof entry?.number === "number"
-            ? Math.max(max, entry.number)
-            : max
-        ), 0);
+        return parsed
+          .map((entry) => entry?.number)
+          .filter((entry): entry is number => typeof entry === "number" && Number.isInteger(entry) && entry > 0);
       })
-      .catch(() => 0),
+      .catch(() => [] as number[]),
     readdir(chaptersDir)
-      .then((entries) => entries.reduce((max, entry) => {
+      .then((entries) => entries.flatMap((entry) => {
         const match = entry.match(/^(\d+)_/);
-        return match ? Math.max(max, parseInt(match[1]!, 10)) : max;
-      }, 0))
-      .catch(() => 0),
+        return match ? [parseInt(match[1]!, 10)] : [];
+      }))
+      .catch(() => [] as number[]),
   ]);
-  return Math.max(indexChapter, fileChapter);
+  return [...indexChapters, ...fileChapters];
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -568,35 +514,15 @@ function deduplicateSummaryRows<T extends { chapter: number }>(rows: ReadonlyArr
   return [...byChapter.values()].sort((a, b) => a.chapter - b.chapter);
 }
 
-function maxSummaryChapter(state: ChapterSummariesState): number {
-  return state.rows.reduce((max, row) => Math.max(max, row.chapter), 0);
-}
-
-function maxHookChapter(hooks: ReadonlyArray<StoredHook>): number {
-  // Only count lastAdvancedChapter — startChapter is a future plan marker,
-  // not an indication that state has been applied up to that chapter.
-  return hooks.reduce(
-    (max, hook) => Math.max(max, hook.lastAdvancedChapter),
-    0,
+export function resolveContiguousChapterPrefix(chapterNumbers: ReadonlyArray<number>): number {
+  const chapters = new Set(
+    chapterNumbers.filter((chapter): chapter is number => Number.isInteger(chapter) && chapter > 0),
   );
-}
-
-export function normalizeHookId(value: string | undefined): string {
-  let normalized = (value ?? "").trim();
-  let previous = "";
-  while (normalized && normalized !== previous) {
-    previous = normalized;
-    normalized = normalized
-      .replace(/^\[(.+?)\]\([^)]+\)$/u, "$1")
-      .replace(/^\*\*(.+)\*\*$/u, "$1")
-      .replace(/^__(.+)__$/u, "$1")
-      .replace(/^\*(.+)\*$/u, "$1")
-      .replace(/^_(.+)_$/u, "$1")
-      .replace(/^`(.+)`$/u, "$1")
-      .replace(/^~~(.+)~~$/u, "$1")
-      .trim();
+  let contiguousChapter = 0;
+  while (chapters.has(contiguousChapter + 1)) {
+    contiguousChapter += 1;
   }
-  return normalized;
+  return contiguousChapter;
 }
 
 function normalizeHookStatus(value: string | undefined, warnings: string[], hookId: string): HookStatus {
@@ -610,14 +536,14 @@ function normalizeHookStatus(value: string | undefined, warnings: string[], hook
   return "open";
 }
 
-function parseIntegerWithWarning(value: string | undefined, warnings: string[], fieldLabel: string): number {
+function parseStrictIntegerWithWarning(value: string | undefined, warnings: string[], fieldLabel: string): number {
   if (!value) return 0;
-  const match = value.match(/\d+/);
-  if (!match) {
-    appendWarning(warnings, `${fieldLabel} normalized from "${value}" to 0`);
-    return 0;
+  const parsed = parseStrictIntegerCell(value);
+  if (parsed !== null) {
+    return parsed;
   }
-  return parseInt(match[0], 10);
+  appendWarning(warnings, `${fieldLabel} normalized from "${value}" to 0`);
+  return 0;
 }
 
 function parseIntegerWithFallback(
@@ -635,41 +561,22 @@ function parseIntegerWithFallback(
   return parseInt(match[0], 10);
 }
 
-function parseMarkdownTableRows(markdown: string): string[][] {
-  return markdown
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("|"))
-    .filter((line) => !line.includes("---"))
-    .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()))
-    .filter((cells) => cells.some(Boolean));
+function parseStrictIntegerCell(value: string | undefined): number | null {
+  if (!value) return null;
+  const normalized = normalizeHookId(value);
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  return parseInt(normalized, 10);
 }
 
-function isStateTableHeaderRow(row: ReadonlyArray<string>): boolean {
-  const first = (row[0] ?? "").trim().toLowerCase();
-  const second = (row[1] ?? "").trim().toLowerCase();
-  return (first === "字段" && second === "值") || (first === "field" && second === "value");
+function normalizeExplicitChapter(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    return 0;
+  }
+  return value;
 }
 
-function isCurrentChapterLabel(label: string): boolean {
-  return /^(当前章节|current chapter)$/i.test(label.trim());
-}
-
-function inferFactSubject(label: string): string {
-  if (/^(当前位置|current location)$/i.test(label)) return "protagonist";
-  if (/^(主角状态|protagonist state)$/i.test(label)) return "protagonist";
-  if (/^(当前目标|current goal)$/i.test(label)) return "protagonist";
-  if (/^(当前限制|current constraint)$/i.test(label)) return "protagonist";
-  if (/^(当前敌我|current alliances|current relationships)$/i.test(label)) return "protagonist";
-  if (/^(当前冲突|current conflict)$/i.test(label)) return "protagonist";
-  return "current_state";
-}
-
-function parseInteger(value: string | undefined): number {
-  if (!value) return 0;
-  const match = value.match(/\d+/);
-  return match ? parseInt(match[0], 10) : 0;
-}
 
 function appendWarning(warnings: string[], warning: string): void {
   if (!warnings.includes(warning)) {

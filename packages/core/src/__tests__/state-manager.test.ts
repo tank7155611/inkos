@@ -114,7 +114,7 @@ describe("StateManager", () => {
       expect(next).toBe(1);
     });
 
-    it("returns max+1 when chapters exist", async () => {
+    it("returns the first missing chapter when the chapter index has gaps", async () => {
       const chapters: ReadonlyArray<ChapterMeta> = [
         {
           number: 1,
@@ -149,7 +149,7 @@ describe("StateManager", () => {
       ];
       await manager.saveChapterIndex("book-x", chapters);
       const next = await manager.getNextChapterNumber("book-x");
-      expect(next).toBe(6);
+      expect(next).toBe(2);
     });
 
     it("returns 2 when only chapter 1 exists", async () => {
@@ -223,6 +223,99 @@ describe("StateManager", () => {
       const next = await manager.getNextChapterNumber(bookId);
 
       expect(next).toBe(4);
+    });
+
+    it("ignores non-contiguous poisoned chapter numbers when calculating the next chapter", async () => {
+      const bookId = "poisoned-next-chapter-book";
+      const bookDir = manager.bookDir(bookId);
+      const chaptersDir = join(bookDir, "chapters");
+      const storyDir = join(bookDir, "story");
+      const stateDir = join(storyDir, "state");
+      await mkdir(chaptersDir, { recursive: true });
+      await mkdir(stateDir, { recursive: true });
+
+      const indexedChapters: ReadonlyArray<ChapterMeta> = [
+        ...Array.from({ length: 12 }, (_, index) => ({
+          number: index + 1,
+          title: `Ch${index + 1}`,
+          status: "ready-for-review" as const,
+          wordCount: 3000,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          auditIssues: [],
+          lengthWarnings: [],
+        })),
+        {
+          number: 142,
+          title: "Poisoned Ch142",
+          status: "audit-failed",
+          wordCount: 3200,
+          createdAt: "2026-01-13T00:00:00Z",
+          updatedAt: "2026-01-13T00:00:00Z",
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+      ];
+
+      await manager.saveChapterIndex(bookId, indexedChapters);
+      await Promise.all([
+        ...Array.from({ length: 12 }, (_, index) => writeFile(
+          join(chaptersDir, `${String(index + 1).padStart(4, "0")}_Ch${index + 1}.md`),
+          `# Chapter ${index + 1}\n\nStable body.`,
+          "utf-8",
+        )),
+        writeFile(
+          join(chaptersDir, "0142_Poisoned.md"),
+          "# Chapter 142\n\nPoisoned body.",
+          "utf-8",
+        ),
+        writeFile(
+          join(storyDir, "current_state.md"),
+          [
+            "# Current State",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Current Chapter | 12 |",
+            "| Current Goal | Enter the next true chapter cleanly |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(
+          join(storyDir, "pending_hooks.md"),
+          [
+            "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| H001 | 1 | mystery | progressing | 《三体》游戏内第141号文明继续展开 | Reveal the true enemy | Narrative text must not drive chapter progress |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(
+          join(storyDir, "chapter_summaries.md"),
+          [
+            "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ...Array.from({ length: 12 }, (_, index) =>
+              `| ${index + 1} | Ch${index + 1} | Lin Yue | Event ${index + 1} | Shift ${index + 1} | Hook ${index + 1} | tense | mainline |`),
+            "| 142 | Poisoned Ch142 | Lin Yue | Poisoned event | Poisoned shift | Poisoned hook | tense | mainline |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(join(stateDir, "manifest.json"), JSON.stringify({
+          schemaVersion: 2,
+          language: "en",
+          lastAppliedChapter: 141,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        }, null, 2), "utf-8"),
+      ]);
+
+      const next = await manager.getNextChapterNumber(bookId);
+
+      expect(next).toBe(13);
     });
   });
 
@@ -792,6 +885,61 @@ describe("StateManager", () => {
       expect(manifest.lastAppliedChapter).toBe(1);
     });
 
+    it("does not treat narrative digits inside hook markdown as runtime chapter progress during bootstrap", async () => {
+      const bookId = "runtime-state-narrative-digit-book";
+      const storyDir = join(manager.bookDir(bookId), "story");
+      await mkdir(storyDir, { recursive: true });
+      await Promise.all([
+        writeFile(
+          join(storyDir, "current_state.md"),
+          [
+            "# Current State",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Current Chapter | 12 |",
+            "| Current Goal | Continue after the imported twelfth chapter |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(
+          join(storyDir, "pending_hooks.md"),
+          [
+            "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| H001 | 1 | mystery | progressing | 《三体》游戏内第141号文明展开到墨子时代 | Reveal the threat | Narrative prose, not chapter metadata |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(
+          join(storyDir, "chapter_summaries.md"),
+          [
+            "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ...Array.from({ length: 12 }, (_, index) =>
+              `| ${index + 1} | Ch${index + 1} | Lin Yue | Event ${index + 1} | Shift ${index + 1} | Hook ${index + 1} | tense | mainline |`),
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+      ]);
+
+      await manager.ensureRuntimeState(bookId, 12);
+
+      const manifest = JSON.parse(
+        await readFile(join(manager.stateDir(bookId), "manifest.json"), "utf-8"),
+      ) as { lastAppliedChapter: number };
+      const hooks = JSON.parse(
+        await readFile(join(manager.stateDir(bookId), "hooks.json"), "utf-8"),
+      ) as { hooks: Array<{ hookId: string; lastAdvancedChapter: number }> };
+
+      expect(manifest.lastAppliedChapter).toBe(12);
+      expect(hooks.hooks[0]?.hookId).toBe("H001");
+      expect(hooks.hooks[0]?.lastAdvancedChapter).toBe(0);
+    });
+
     it("repairs poisoned manifest chapter when it runs ahead of persisted runtime state", async () => {
       const bookId = "runtime-state-poisoned-book";
       const storyDir = join(manager.bookDir(bookId), "story");
@@ -961,6 +1109,145 @@ describe("StateManager", () => {
       ) as { hooks: Array<{ hookId: string }> };
 
       expect(hooks.hooks.map((hook) => hook.hookId)).toEqual(["H009"]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // rollbackToChapter — reject a chapter and discard downstream state
+  // -------------------------------------------------------------------------
+
+  describe("rollbackToChapter", () => {
+    const bookId = "rollback-book";
+
+    async function setupRollbackBook(): Promise<void> {
+      await manager.saveBookConfig(bookId, {
+        id: bookId,
+        title: "Rollback Test",
+        platform: "tomato",
+        genre: "xuanhuan",
+        status: "active",
+        targetChapters: 10,
+        chapterWordCount: 3000,
+        createdAt: "2026-03-31T00:00:00Z",
+        updatedAt: "2026-03-31T00:00:00Z",
+      });
+
+      const bookDir = manager.bookDir(bookId);
+      const storyDir = join(bookDir, "story");
+      const chaptersDir = join(bookDir, "chapters");
+      const runtimeDir = join(storyDir, "runtime");
+      await mkdir(runtimeDir, { recursive: true });
+      await mkdir(chaptersDir, { recursive: true });
+
+      // Write initial state (chapter 0 baseline)
+      await writeFile(join(storyDir, "current_state.md"), "# State\n\n- Initial state.\n", "utf-8");
+      await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n", "utf-8");
+      await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n", "utf-8");
+      await manager.snapshotState(bookId, 0);
+
+      // Write chapter 1 state + file
+      await writeFile(join(storyDir, "current_state.md"), "# State\n\n- After chapter 1.\n", "utf-8");
+      await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n- hook-2\n", "utf-8");
+      await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n\n| 1 | Title 1 |\n", "utf-8");
+      await writeFile(join(chaptersDir, "0001_Title_One.md"), "# Chapter 1\n\nContent 1.", "utf-8");
+      await manager.snapshotState(bookId, 1);
+
+      // Write chapter 2 state + file
+      await writeFile(join(storyDir, "current_state.md"), "# State\n\n- After chapter 2.\n", "utf-8");
+      await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n- hook-2\n- hook-3\n", "utf-8");
+      await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n\n| 1 | Title 1 |\n| 2 | Title 2 |\n", "utf-8");
+      await writeFile(join(chaptersDir, "0002_Title_Two.md"), "# Chapter 2\n\nContent 2.", "utf-8");
+      await writeFile(join(runtimeDir, "chapter-002.intent.md"), "intent 2", "utf-8");
+      await manager.snapshotState(bookId, 2);
+
+      // Write chapter 3 state + file
+      await writeFile(join(storyDir, "current_state.md"), "# State\n\n- After chapter 3.\n", "utf-8");
+      await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n- hook-2\n- hook-3\n- hook-4\n", "utf-8");
+      await writeFile(join(storyDir, "chapter_summaries.md"), "# Summaries\n\n| 1 | Title 1 |\n| 2 | Title 2 |\n| 3 | Title 3 |\n", "utf-8");
+      await writeFile(join(chaptersDir, "0003_Title_Three.md"), "# Chapter 3\n\nContent 3.", "utf-8");
+      await writeFile(join(runtimeDir, "chapter-003.intent.md"), "intent 3", "utf-8");
+      await manager.snapshotState(bookId, 3);
+
+      // Save index with all 3 chapters
+      const now = "2026-03-31T00:00:00Z";
+      await manager.saveChapterIndex(bookId, [
+        { number: 1, title: "Title One", status: "approved", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 2, title: "Title Two", status: "ready-for-review", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 3, title: "Title Three", status: "audit-failed", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: ["pacing"], lengthWarnings: [] },
+      ]);
+    }
+
+    it("restores state to the target chapter and removes subsequent chapters", async () => {
+      await setupRollbackBook();
+
+      const discarded = await manager.rollbackToChapter(bookId, 1);
+
+      expect(discarded).toEqual([2, 3]);
+
+      // State should be restored to chapter 1 snapshot
+      const bookDir = manager.bookDir(bookId);
+      const state = await readFile(join(bookDir, "story", "current_state.md"), "utf-8");
+      expect(state).toContain("After chapter 1");
+      expect(state).not.toContain("After chapter 3");
+
+      const hooks = await readFile(join(bookDir, "story", "pending_hooks.md"), "utf-8");
+      expect(hooks).toContain("hook-2");
+      expect(hooks).not.toContain("hook-4");
+
+      // Chapter index should only have chapter 1
+      const index = await manager.loadChapterIndex(bookId);
+      expect(index).toHaveLength(1);
+      expect(index[0]!.number).toBe(1);
+      expect(index[0]!.status).toBe("approved");
+
+      // Chapter files for 2 and 3 should be deleted
+      const chaptersDir = join(bookDir, "chapters");
+      const { readdir: rd } = await import("node:fs/promises");
+      const remaining = (await rd(chaptersDir)).filter((f) => f.endsWith(".md"));
+      expect(remaining).toEqual(["0001_Title_One.md"]);
+
+      // Snapshots for 2 and 3 should be deleted
+      const snapshotsDir = join(bookDir, "story", "snapshots");
+      const snapshots = await rd(snapshotsDir);
+      expect(snapshots.sort()).toEqual(["0", "1"]);
+    });
+
+    it("rolls back to chapter 0 (initial state) when rejecting chapter 1", async () => {
+      await setupRollbackBook();
+
+      const discarded = await manager.rollbackToChapter(bookId, 0);
+
+      expect(discarded).toEqual([1, 2, 3]);
+
+      const bookDir = manager.bookDir(bookId);
+      const state = await readFile(join(bookDir, "story", "current_state.md"), "utf-8");
+      expect(state).toContain("Initial state");
+
+      const index = await manager.loadChapterIndex(bookId);
+      expect(index).toHaveLength(0);
+    });
+
+    it("throws when the target snapshot does not exist", async () => {
+      await setupRollbackBook();
+
+      await expect(manager.rollbackToChapter(bookId, 99)).rejects.toThrow("Cannot restore snapshot");
+    });
+
+    it("removes sqlite memory files when rolling back", async () => {
+      await setupRollbackBook();
+
+      const storyDir = join(manager.bookDir(bookId), "story");
+      await Promise.all([
+        writeFile(join(storyDir, "memory.db"), "stale db", "utf-8"),
+        writeFile(join(storyDir, "memory.db-shm"), "stale shm", "utf-8"),
+        writeFile(join(storyDir, "memory.db-wal"), "stale wal", "utf-8"),
+      ]);
+
+      await manager.rollbackToChapter(bookId, 1);
+
+      await expect(stat(join(storyDir, "memory.db"))).rejects.toThrow();
+      await expect(stat(join(storyDir, "memory.db-shm"))).rejects.toThrow();
+      await expect(stat(join(storyDir, "memory.db-wal"))).rejects.toThrow();
     });
   });
 });
