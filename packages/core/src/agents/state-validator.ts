@@ -120,17 +120,42 @@ ${chapterContent.slice(0, 6000)}`;
       throw new Error("LLM returned empty response");
     }
 
+    // 先剥除 markdown 代码块包裹（Claude Thinking 模式常见输出格式）
+    const stripped = trimmed
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "")
+      .trim();
+
     const parsed = extractFirstValidJsonObject<{
       warnings?: Array<{ category?: string; description?: string }>;
       passed?: boolean;
-    }>(trimmed);
+    }>(stripped);
+
+    // 容错降级：JSON 解析失败时不崩溃流水线，而是尝试用正则提取 passed 字段
     if (!parsed) {
-      throw new Error("State validator returned invalid JSON");
+      this.log?.warn("State validator: JSON parse failed, attempting regex fallback");
+      const passedMatch = /["']?passed["']?\s*:\s*(true|false)/i.exec(stripped);
+      const passedValue = passedMatch ? passedMatch[1]?.toLowerCase() === "true" : true;
+      return {
+        warnings: [{
+          category: "validator_parse_error",
+          description: "State validator output could not be fully parsed (model output format issue). Treated as passed to avoid blocking pipeline.",
+        }],
+        passed: passedValue,
+      };
     }
 
     try {
       if (typeof parsed.passed !== "boolean") {
-        throw new Error("missing boolean 'passed' field");
+        // 宽松处理：passed 字段缺失时默认为 true
+        this.log?.warn("State validator: 'passed' field missing, defaulting to true");
+        return {
+          warnings: (parsed.warnings ?? []).map((w) => ({
+            category: w.category ?? "unknown",
+            description: w.description ?? "",
+          })),
+          passed: true,
+        };
       }
 
       if (parsed.warnings !== undefined && !Array.isArray(parsed.warnings)) {

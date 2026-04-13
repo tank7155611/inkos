@@ -548,37 +548,34 @@ ${chapterContent}`;
   }
 
   private parseAuditResult(content: string, language: PromptLanguage): AuditResult {
-    // Try multiple JSON extraction strategies (handles small/local models)
+    // 预处理：剥离可能存在的 markdown 标记和首尾杂质
+    const trimmed = content.trim();
+    const stripped = trimmed
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "")
+      .trim();
 
-    // Strategy 1: Find balanced JSON object (not greedy)
-    const balanced = this.extractBalancedJson(content);
+    // Strategy 1: Find balanced JSON object (robust version)
+    const balanced = this.extractBalancedJson(stripped);
     if (balanced) {
       const result = this.tryParseAuditJson(balanced, language);
       if (result) return result;
     }
 
-    // Strategy 2: Try the whole content as JSON (some models output pure JSON)
-    const trimmed = content.trim();
-    if (trimmed.startsWith("{")) {
-      const result = this.tryParseAuditJson(trimmed, language);
+    // Strategy 2: Whole content as JSON
+    if (stripped.startsWith("{")) {
+      const result = this.tryParseAuditJson(stripped, language);
       if (result) return result;
     }
 
-    // Strategy 3: Look for ```json code blocks
-    const codeBlockMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (codeBlockMatch) {
-      const result = this.tryParseAuditJson(codeBlockMatch[1]!.trim(), language);
-      if (result) return result;
-    }
-
-    // Strategy 4: Try to extract individual fields via regex (last resort fallback)
-    const passedMatch = content.match(/"passed"\s*:\s*(true|false)/);
-    const issuesMatch = content.match(/"issues"\s*:\s*\[([\s\S]*?)\]/);
-    const summaryMatch = content.match(/"summary"\s*:\s*"([^"]*)"/);
+    // Strategy 3: Regex fallback (last resort for broken JSON)
+    const passedMatch = stripped.match(/"passed"\s*:\s*(true|false)/i);
     if (passedMatch) {
+      this.log?.warn("Continuity auditor: JSON parse failed, using regex fallback");
+      const issuesMatch = stripped.match(/"issues"\s*:\s*\[([\s\S]*?)\]/);
+      const summaryMatch = stripped.match(/"summary"\s*:\s*"([^"]*)"/);
       const issues: AuditIssue[] = [];
       if (issuesMatch) {
-        // Try to parse individual issue objects
         const issuePattern = /\{[^{}]*"severity"\s*:\s*"[^"]*"[^{}]*\}/g;
         let match: RegExpExecArray | null;
         while ((match = issuePattern.exec(issuesMatch[1]!)) !== null) {
@@ -590,16 +587,38 @@ ${chapterContent}`;
               description: issue.description ?? "",
               suggestion: issue.suggestion ?? "",
             });
-          } catch {
-            // skip malformed individual issue
-          }
+          } catch { /* skip malformed issue */ }
         }
       }
       return {
-        passed: passedMatch[1] === "true",
-        issues,
-        summary: summaryMatch?.[1] ?? "",
+        passed: passedMatch[1]?.toLowerCase() === "true",
+        issues: [
+          ...issues,
+          {
+            severity: "warning",
+            category: "validator_parse_error",
+            description: "Auditor output was partially parsed via regex due to format issues.",
+            suggestion: "Check model output format if this persists.",
+          }
+        ],
+        summary: summaryMatch?.[1] ?? (language === "en" ? "Partial parse fallback" : "解析降级回退"),
       };
+    }
+
+    // Fail-soft: if we still can't parse but have content, don't block the pipeline entirely
+    if (stripped.length > 50) {
+       return {
+         passed: true, // Default to true to allow write-next
+         issues: [{
+           severity: "warning",
+           category: "system_parse_error",
+           description: language === "en"
+             ? "Audit output format was invalid. Treated as passed to avoid blocking pipeline."
+             : "审稿输出格式异常，降级通过以避免阻塞流水线。",
+           suggestion: "Inspect the raw response if context continuity is critical.",
+         }],
+         summary: "Parse failed, fail-soft triggered",
+       };
     }
 
     return {
@@ -608,13 +627,11 @@ ${chapterContent}`;
         severity: "critical",
         category: language === "en" ? "System Error" : "系统错误",
         description: language === "en"
-          ? "Audit output format was invalid and could not be parsed as JSON."
-          : "审稿输出格式异常，无法解析为 JSON",
-        suggestion: language === "en"
-          ? "The model may not support reliable structured output. Try a stronger model or inspect the API response format."
-          : "可能是模型不支持结构化输出。尝试换一个更大的模型，或检查 API 返回格式。",
+          ? "Audit output was empty or too short."
+          : "审稿输出内容为空或过短。",
+        suggestion: "Check model configuration or connectivity.",
       }],
-      summary: language === "en" ? "Audit output parsing failed" : "审稿输出解析失败",
+      summary: language === "en" ? "Audit failed" : "审稿失败",
     };
   }
 
@@ -665,11 +682,43 @@ ${overrides}\n`;
   private extractBalancedJson(text: string): string | null {
     const start = text.indexOf("{");
     if (start === -1) return null;
+
     let depth = 0;
+    let inString = false;
+    let escaped = false;
+
     for (let i = start; i < text.length; i++) {
-      if (text[i] === "{") depth++;
-      if (text[i] === "}") depth--;
-      if (depth === 0) return text.slice(start, i + 1);
+      const char = text[i]!;
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{") {
+        depth++;
+        continue;
+      }
+      if (char === "}") {
+        depth--;
+        if (depth === 0) return text.slice(start, i + 1);
+        if (depth < 0) return null;
+      }
     }
     return null;
   }

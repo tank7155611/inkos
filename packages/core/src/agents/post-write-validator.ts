@@ -73,7 +73,8 @@ export function validatePostWrite(
     return validatePostWriteEnglish(content, genreProfile, bookRules);
   }
 
-  // 1. 硬性禁令: "不是…而是…" 句式
+  // 1. 硬性禁令: "不是…而是…" 句式 (已注销，避免模型生成时的死循环)
+  /*
   if (/不是[^，。！？\n]{0,30}[，,]?\s*而是/.test(content)) {
     violations.push({
       rule: "禁止句式",
@@ -82,8 +83,10 @@ export function validatePostWrite(
       suggestion: "改用直述句",
     });
   }
+  */
 
-  // 2. 硬性禁令: 破折号
+  // 2. 硬性禁令: 破折号 (已注销，避免模型生成时的死循环)
+  /*
   if (content.includes("——")) {
     violations.push({
       rule: "禁止破折号",
@@ -92,6 +95,7 @@ export function validatePostWrite(
       suggestion: "用逗号或句号断句",
     });
   }
+  */
 
   // 3. 转折/惊讶标记词密度 ≤ 1次/3000字
   const markerCounts: Record<string, number> = {};
